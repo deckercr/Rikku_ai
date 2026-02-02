@@ -1,5 +1,6 @@
 import requests
 import base64
+import time
 
 # Optional imports for capture functionality
 try:
@@ -24,7 +25,11 @@ def capture_vision(capture_type="webcam"):
         if not CV2_AVAILABLE:
             print("Error: OpenCV not available for webcam capture")
             return None
-        cam = cv2.VideoCapture(0)
+        cam = cv2.VideoCapture(1)
+        time.sleep(0.5)  # Let camera warm up
+        # Discard a few frames to allow auto-exposure to adjust
+        for _ in range(5):
+            cam.read()
         ret, frame = cam.read()
         if ret:
             _, buffer = cv2.imencode('.jpg', frame)
@@ -51,7 +56,9 @@ def send_to_rikku(prompt, vision_type=None):
     if vision_type:
         print(f"Capturing {vision_type}...")
         image_data = capture_vision(vision_type)
-        if image_data is None and vision_type:
+        if image_data:
+            print(f"Captured image: {len(image_data)} bytes (base64)")
+        else:
             print("Continuing without image...")
 
     payload = {
@@ -75,5 +82,5 @@ if __name__ == "__main__":
 
     # Example usage:
     send_to_rikku("Hey Rikku, what time is it?")
-    # send_to_rikku("Look at me through my webcam!", vision_type="webcam")
+    send_to_rikku("Look at me through my webcam!", vision_type="webcam")
     # send_to_rikku("What's on my screen?", vision_type="screenshot")
