@@ -1,5 +1,6 @@
 import datetime
 import os
+from zoneinfo import ZoneInfo
 
 # Optional imports for hardware-dependent tools
 try:
@@ -36,7 +37,10 @@ def register_tool(name, description, parameters):
     parameters={"type": "object", "properties": {}}
 )
 def get_current_time():
-    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    tz_name = os.environ.get("TZ", "America/Chicago")
+    tz = ZoneInfo(tz_name)
+    now = datetime.datetime.now(tz)
+    return now.strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
 @register_tool(
