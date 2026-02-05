@@ -9,6 +9,11 @@ from scipy.io.wavfile import write
 import io
 import tempfile
 import os
+import re
+from dotenv import load_dotenv
+
+# Load .env from project root (one level up from client/)
+load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
 
 # Optional imports for capture functionality
 try:
@@ -24,10 +29,29 @@ try:
 except ImportError:
     WHISPER_AVAILABLE = False
 
+# --- GROQ STT CONFIG ---
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+GROQ_STT_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
+GROQ_STT_MODEL = "whisper-large-v3-turbo"  # Fast + accurate
+
 # --- AUDIO CONFIG ---
-WHISPER_MODEL_SIZE = "base.en"  # Options: tiny.en, base.en, small.en, medium.en, large
+WHISPER_MODEL_SIZE = "small.en"  # Local fallback: tiny.en, base.en, small.en, medium.en, large
 SAMPLE_RATE = 16000
-RECORD_DURATION = 5  # Max record time per segment in seconds
+MAX_RECORD_DURATION = 30  # Max record time in seconds (safety cap)
+SILENCE_THRESHOLD = None  # Auto-calibrated at startup; set manually to override
+SILENCE_DURATION = 1.5  # Seconds of silence before stopping
+CHUNK_DURATION = 0.1  # Size of each audio chunk in seconds
+
+# --- WAKE WORD CONFIG ---
+# Multiple variations to handle Whisper's transcription of "Rikku"
+WAKE_WORDS = [
+    "rikku", "riku", "rico", "reeku", "ricku", "rikou", "reekou",
+    "riku's", "rikku's", "rico's", "reeko", "ricco", "riko",
+    "reku", "reiku", "ryku", "ryko", "roku", "riku,",
+    "rika", "rika's", "rikka", "rekka",
+]
+CANONICAL_NAME = "Rikku"  # The correct name to substitute for wake word variants
+ACTIVE_LISTEN_DURATION = 60  # Seconds to stay active after wake word
 
 # Initialize Whisper model (lazy loading)
 stt_model = None
@@ -73,6 +97,31 @@ def load_whisper_model():
         stt_model = whisper.load_model(WHISPER_MODEL_SIZE)
         print("Whisper model loaded.")
     return stt_model
+
+
+def calibrate_silence(device=None, samplerate=SAMPLE_RATE, duration=2):
+    """Record ambient noise and set silence threshold automatically."""
+    global SILENCE_THRESHOLD
+    if SILENCE_THRESHOLD is not None:
+        print(f"Using manual silence threshold: {SILENCE_THRESHOLD}")
+        return
+
+    print("Calibrating silence... (stay quiet for 2 seconds)")
+    ambient = sd.rec(
+        int(duration * samplerate),
+        samplerate=samplerate,
+        channels=1,
+        dtype='float32',
+        device=device
+    )
+    sd.wait()
+    ambient = ambient.flatten()
+
+    # Measure the noise floor RMS, then set threshold above it
+    ambient_rms = np.sqrt(np.mean(ambient ** 2))
+    SILENCE_THRESHOLD = ambient_rms * 3
+    print(f"Ambient noise RMS: {ambient_rms:.4f}, silence threshold set to: {SILENCE_THRESHOLD:.4f}")
+
 
 def get_preferred_monitor():
     """Get preferred monitor: DP-11 if available, otherwise eDP-2."""
@@ -150,40 +199,138 @@ def capture_vision(capture_type="webcam"):
 
 
 def record_audio(device=None, samplerate=SAMPLE_RATE):
-    """Records audio from the mic for RECORD_DURATION seconds."""
+    """Records audio with voice activity detection.
+    Waits for speech, then records until silence is detected.
+    """
+    chunk_samples = int(CHUNK_DURATION * samplerate)
+    max_chunks = int(MAX_RECORD_DURATION / CHUNK_DURATION)
+    silence_chunks_needed = int(SILENCE_DURATION / CHUNK_DURATION)
+
+    chunks = []
+    silence_count = 0
+    speech_detected = False
+
     print("[Listening...]")
-    recording = sd.rec(
-        int(RECORD_DURATION * samplerate),
-        samplerate=samplerate,
-        channels=1,
-        dtype='float32',
-        device=device
+
+    for _ in range(max_chunks):
+        chunk = sd.rec(
+            chunk_samples,
+            samplerate=samplerate,
+            channels=1,
+            dtype='float32',
+            device=device
+        )
+        sd.wait()
+        chunk = chunk.flatten()
+        chunks.append(chunk)
+
+        # Measure energy (RMS)
+        rms = np.sqrt(np.mean(chunk ** 2))
+
+        if rms >= SILENCE_THRESHOLD:
+            speech_detected = True
+            silence_count = 0
+        else:
+            if speech_detected:
+                silence_count += 1
+
+        # Stop after sustained silence following speech
+        if speech_detected and silence_count >= silence_chunks_needed:
+            break
+
+    if not chunks:
+        return np.array([], dtype='float32'), samplerate
+
+    return np.concatenate(chunks), samplerate
+
+
+def audio_to_wav_bytes(audio_data, samplerate):
+    """Convert float32 audio array to WAV bytes in memory."""
+    audio_int16 = (audio_data * 32767).astype(np.int16)
+    buf = io.BytesIO()
+    write(buf, samplerate, audio_int16)
+    buf.seek(0)
+    return buf.read()
+
+
+def transcribe_audio_groq(wav_bytes):
+    """Transcribe audio using Groq's Whisper API."""
+    response = requests.post(
+        GROQ_STT_URL,
+        headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+        files={"file": ("audio.wav", wav_bytes, "audio/wav")},
+        data={
+            "model": GROQ_STT_MODEL,
+            "language": "en",
+            "response_format": "json",
+        },
+        timeout=15,
     )
-    sd.wait()
-    return recording.flatten(), samplerate
+    response.raise_for_status()
+    return response.json().get("text", "").strip()
+
+
+def transcribe_audio_local(temp_path):
+    """Transcribe audio using local Whisper model."""
+    model = load_whisper_model()
+    if model is None:
+        return ""
+    result = model.transcribe(temp_path, fp16=False)
+    return result["text"].strip()
 
 
 def transcribe_audio(audio_data, samplerate=SAMPLE_RATE):
-    """Converts audio array to text using Whisper."""
-    model = load_whisper_model()
-    if model is None:
-        print("Error: Whisper not available")
-        return ""
+    """Converts audio to text. Uses Groq API if available, falls back to local Whisper."""
+    wav_bytes = audio_to_wav_bytes(audio_data, samplerate)
 
-    # Write audio to a temporary WAV file (whisper requires a file)
+    # Try Groq API first
+    if GROQ_API_KEY:
+        try:
+            text = transcribe_audio_groq(wav_bytes)
+            return text
+        except Exception as e:
+            print(f"Groq STT failed, falling back to local: {e}")
+
+    # Fall back to local Whisper
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+        f.write(wav_bytes)
         temp_path = f.name
-        # Convert float32 to int16 for WAV
-        audio_int16 = (audio_data * 32767).astype(np.int16)
-        write(f.name, samplerate, audio_int16)
 
     try:
-        # Whisper will resample internally to 16kHz
-        result = model.transcribe(temp_path, fp16=False)
-        text = result["text"].strip()
-        return text
+        return transcribe_audio_local(temp_path)
     finally:
         os.unlink(temp_path)
+
+
+def contains_wake_word(text):
+    """Check if text contains any wake word variant.
+    Returns (found, corrected_text) where any matched variant is replaced with CANONICAL_NAME.
+    """
+    if not text:
+        return False, text
+
+    lower_text = text.lower()
+    for wake_word in WAKE_WORDS:
+        if wake_word in lower_text:
+            # Replace the variant with the correct name (case-insensitive)
+            corrected = re.sub(re.escape(wake_word), CANONICAL_NAME, text, count=1, flags=re.IGNORECASE)
+            return True, corrected
+    return False, text
+
+
+def is_active_listening(last_wake_time):
+    """Check if we're still in the active listening window."""
+    if last_wake_time is None:
+        return False
+    return (time.time() - last_wake_time) < ACTIVE_LISTEN_DURATION
+
+
+def get_remaining_active_time(last_wake_time):
+    """Get remaining seconds in active listening mode."""
+    if last_wake_time is None:
+        return 0
+    remaining = ACTIVE_LISTEN_DURATION - (time.time() - last_wake_time)
+    return max(0, int(remaining))
 
 
 def send_to_rikku(prompt, vision_type=None):
@@ -228,20 +375,33 @@ if __name__ == "__main__":
     print("Rikku Voice Client Active.")
     print(f"  Webcam: {CV2_AVAILABLE}")
     print(f"  Screenshot: {HYPRSHOT_AVAILABLE}")
-    print(f"  Whisper STT: {WHISPER_AVAILABLE}")
+    print(f"  Groq STT: {'configured' if GROQ_API_KEY else 'no API key (set GROQ_API_KEY)'}")
+    print(f"  Local Whisper fallback: {WHISPER_AVAILABLE}")
+    print(f"  Wake words: {', '.join(WAKE_WORDS[:5])}...")
 
     # Detect input device
     input_device, device_samplerate = get_input_device()
 
-    if WHISPER_AVAILABLE:
-        # Pre-load the model
+    if not GROQ_API_KEY and WHISPER_AVAILABLE:
+        # Only pre-load local model if Groq isn't configured
         load_whisper_model()
 
-    print("\nPress Enter to talk, Ctrl+C to quit.")
+    # Calibrate silence threshold for this mic/environment
+    calibrate_silence(device=input_device, samplerate=device_samplerate)
+
+    print("\nListening for wake word 'Rikku'... (Ctrl+C to quit)")
+
+    # Track when we last heard the wake word
+    last_wake_time = None
 
     try:
         while True:
-            input("\n[Press Enter to Talk]")
+            # Show status
+            if is_active_listening(last_wake_time):
+                remaining = get_remaining_active_time(last_wake_time)
+                print(f"\n[Active listening: {remaining}s remaining]")
+            else:
+                print("\n[Waiting for wake word...]")
 
             # 1. Record audio
             audio_buffer, rec_rate = record_audio(device=input_device, samplerate=device_samplerate)
@@ -249,12 +409,29 @@ if __name__ == "__main__":
             # 2. Transcribe
             text_query = transcribe_audio(audio_buffer, samplerate=rec_rate)
 
-            if text_query:
+            if not text_query:
+                continue
+
+            # Check for wake word or active listening mode
+            has_wake_word, processed_text = contains_wake_word(text_query)
+
+            if has_wake_word:
+                # Wake word detected - activate and process the full sentence
+                last_wake_time = time.time()
+                print(f"[Wake word detected!]")
+                print(f"You: {processed_text}")
+                send_to_rikku(processed_text)
+
+            elif is_active_listening(last_wake_time):
+                # In active listening mode - process without wake word
                 print(f"You: {text_query}")
-                # 3. Send to Rikku
                 send_to_rikku(text_query)
+                # Reset the timer on each interaction to keep conversation going
+                last_wake_time = time.time()
+
             else:
-                print("... I didn't catch that.")
+                # Not active and no wake word - ignore (but show for debugging)
+                print(f"(Ignored: {text_query})")
 
     except KeyboardInterrupt:
         print("\nClosing Rikku Client.")
