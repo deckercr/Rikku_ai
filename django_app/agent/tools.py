@@ -111,3 +111,34 @@ def enroll_user(args=None):
         )
     except ValueError as e:
         return f"Enrollment failed: {e}"
+
+
+@register_tool(
+    name="rename_user",
+    description=(
+        "Renames an enrolled user's profile. Use this when someone tells you "
+        "their name is wrong or they want to be called something different. "
+        "Usage: [TOOL: rename_user:OldName>NewName]"
+    ),
+    parameters={"type": "object", "properties": {"names": {"type": "string"}}}
+)
+def rename_user(args=None):
+    from .models import UserProfile
+
+    if not args or ">" not in args:
+        return "Error: Usage: [TOOL: rename_user:OldName>NewName]"
+
+    old_name, new_name = args.split(">", 1)
+    old_name = old_name.strip()
+    new_name = new_name.strip()
+
+    if not old_name or not new_name:
+        return "Error: Both old and new names are required."
+
+    try:
+        profile = UserProfile.objects.get(name=old_name)
+        profile.name = new_name
+        profile.save()
+        return f"Done! Renamed '{old_name}' to '{new_name}'. I'll call them {new_name} from now on."
+    except UserProfile.DoesNotExist:
+        return f"Error: No profile found with the name '{old_name}'."

@@ -146,7 +146,9 @@ def chat(request):
                     f"You are currently talking to {identified_user} — you recognize them. "
                     "A live webcam image is attached. Respond conversationally to what they said. "
                     "Do NOT describe the image unless they ask you to. "
-                    "Do NOT use any tools unless explicitly asked."
+                    "Do NOT use any tools unless explicitly asked.\n\n"
+                    "If they say their name is wrong or ask to be called something else, "
+                    f"use: [TOOL: rename_user:{identified_user}>NewName]"
                 )
             elif face_detected:
                 system_prompt = (
