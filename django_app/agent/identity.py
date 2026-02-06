@@ -15,6 +15,9 @@ logger = logging.getLogger(__name__)
 _deepface = None
 
 DEEPFACE_MODEL = "ArcFace"  # 512-dim embeddings, good accuracy/speed balance
+# "ssd" uses OpenCV's DNN SSD detector — much more robust than "opencv" (Haar cascade)
+# which fails with glasses, angles, and dim lighting. No extra dependencies needed.
+DETECTOR_BACKEND = "ssd"
 RECOGNITION_THRESHOLD = 0.40  # Cosine distance; lower = stricter matching
 MAX_EMBEDDINGS_PER_USER = 10  # Cap stored faces to avoid DB bloat
 
@@ -67,13 +70,14 @@ def extract_embedding(image_b64):
             img_path=img_array,
             model_name=DEEPFACE_MODEL,
             enforce_detection=True,
-            detector_backend="opencv",
+            detector_backend=DETECTOR_BACKEND,
         )
         if results:
+            logger.info("Face detected (confidence: %.2f)", results[0].get("face_confidence", -1))
             return results[0]["embedding"]
     except ValueError as e:
         # "Face could not be detected" — normal when no face is in frame
-        logger.debug("No face detected: %s", e)
+        logger.warning("No face detected by %s: %s", DETECTOR_BACKEND, e)
     except Exception:
         logger.exception("Error extracting face embedding")
 
