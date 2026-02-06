@@ -79,3 +79,35 @@ def capture_webcam():
         return f"Photo captured at {path}. I see you!"
     cam.release()
     return "Failed to access webcam. Device may not be connected."
+
+
+@register_tool(
+    name="enroll_user",
+    description=(
+        "Enrolls a new user's face for recognition. Use this when you see someone "
+        "you don't recognize and they have told you their name. "
+        "Usage: [TOOL: enroll_user:TheirName]"
+    ),
+    parameters={"type": "object", "properties": {"name": {"type": "string"}}}
+)
+def enroll_user(args=None):
+    from .identity import get_current_image, enroll_face
+
+    if not args or not args.strip():
+        return "Error: No name provided. Usage: [TOOL: enroll_user:TheirName]"
+
+    name = args.strip()
+    image_b64 = get_current_image()
+    if not image_b64:
+        return "Error: No webcam image available to enroll from."
+
+    try:
+        profile, _ = enroll_face(name, image_b64)
+        count = profile.face_embeddings.count()
+        return (
+            f"Successfully enrolled {name}! "
+            f"I now have {count} face reference(s) for them. "
+            f"I will recognize {name} from now on."
+        )
+    except ValueError as e:
+        return f"Enrollment failed: {e}"

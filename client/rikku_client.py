@@ -1,3 +1,4 @@
+import argparse
 import requests
 import base64
 import time
@@ -152,7 +153,11 @@ def hyprshot_available():
 HYPRSHOT_AVAILABLE = hyprshot_available()
 
 # Your server's IP
-CHAT_URL = "http://10.0.0.5:8080/api/chat/"
+SERVER_BASE = "http://10.0.0.5:8080"
+CHAT_URL = f"{SERVER_BASE}/api/chat/"
+ENROLL_URL = f"{SERVER_BASE}/api/identity/enroll/"
+IDENTIFY_URL = f"{SERVER_BASE}/api/identity/identify/"
+PROFILES_URL = f"{SERVER_BASE}/api/identity/profiles/"
 
 
 def capture_vision(capture_type="webcam"):
@@ -333,7 +338,56 @@ def get_remaining_active_time(last_wake_time):
     return max(0, int(remaining))
 
 
-def send_to_rikku(prompt, vision_type=None):
+def enroll_face(name):
+    """Capture a webcam frame and enroll the face under the given name."""
+    if not CV2_AVAILABLE:
+        print("Error: OpenCV required for face enrollment")
+        return False
+
+    print(f"Capturing face for enrollment as '{name}'...")
+    image_data = capture_vision("webcam")
+    if not image_data:
+        print("Error: Failed to capture webcam image")
+        return False
+
+    try:
+        response = requests.post(
+            ENROLL_URL,
+            json={"name": name, "image": image_data},
+            timeout=30,
+        )
+        response.raise_for_status()
+        result = response.json()
+        print(f"Enrolled: {result.get('user')} "
+              f"(face #{result.get('face_id')}, "
+              f"{result.get('total_embeddings')} total embeddings)")
+        return True
+    except requests.exceptions.RequestException as e:
+        print(f"Enrollment failed: {e}")
+        try:
+            print(f"  Detail: {response.json().get('error', '')}")
+        except Exception:
+            pass
+        return False
+
+
+def list_profiles():
+    """List all enrolled user profiles."""
+    try:
+        response = requests.get(PROFILES_URL, timeout=10)
+        response.raise_for_status()
+        profiles = response.json().get("profiles", [])
+        if not profiles:
+            print("No enrolled profiles.")
+            return
+        print("Enrolled profiles:")
+        for p in profiles:
+            print(f"  [{p['id']}] {p['name']} — {p['embeddings']} face(s)")
+    except requests.exceptions.RequestException as e:
+        print(f"Error listing profiles: {e}")
+
+
+def send_to_rikku(prompt, vision_type=None, auto_identify=False):
     """Send prompt to Rikku server with optional vision."""
     if not prompt:
         return None
@@ -355,6 +409,12 @@ def send_to_rikku(prompt, vision_type=None):
         else:
             print("Continuing without image...")
 
+    # In auto-identify mode, always include a webcam frame so Rikku can identify you
+    if auto_identify and image_data is None and CV2_AVAILABLE:
+        image_data = capture_vision("webcam")
+        if image_data:
+            print("(auto-identify: webcam frame attached)")
+
     payload = {
         "prompt": prompt,
         "image": image_data
@@ -372,11 +432,39 @@ def send_to_rikku(prompt, vision_type=None):
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Rikku Voice Client")
+    parser.add_argument(
+        "--enroll", metavar="NAME",
+        help="Enroll your face under the given name (captures from webcam)"
+    )
+    parser.add_argument(
+        "--profiles", action="store_true",
+        help="List all enrolled user profiles"
+    )
+    parser.add_argument(
+        "--no-identify", action="store_true",
+        help="Disable auto-identification (webcam frame not sent with every request)"
+    )
+    args = parser.parse_args()
+
+    auto_identify = not args.no_identify
+
+    # Handle one-shot commands
+    if args.enroll:
+        enroll_face(args.enroll)
+        exit(0)
+
+    if args.profiles:
+        list_profiles()
+        exit(0)
+
+    # Normal voice client mode
     print("Rikku Voice Client Active.")
     print(f"  Webcam: {CV2_AVAILABLE}")
     print(f"  Screenshot: {HYPRSHOT_AVAILABLE}")
     print(f"  Groq STT: {'configured' if GROQ_API_KEY else 'no API key (set GROQ_API_KEY)'}")
     print(f"  Local Whisper fallback: {WHISPER_AVAILABLE}")
+    print(f"  Auto-Identify: {'ON' if auto_identify else 'OFF'}")
     print(f"  Wake words: {', '.join(WAKE_WORDS[:5])}...")
 
     # Detect input device
@@ -420,12 +508,12 @@ if __name__ == "__main__":
                 last_wake_time = time.time()
                 print(f"[Wake word detected!]")
                 print(f"You: {processed_text}")
-                send_to_rikku(processed_text)
+                send_to_rikku(processed_text, auto_identify=auto_identify)
 
             elif is_active_listening(last_wake_time):
                 # In active listening mode - process without wake word
                 print(f"You: {text_query}")
-                send_to_rikku(text_query)
+                send_to_rikku(text_query, auto_identify=auto_identify)
                 # Reset the timer on each interaction to keep conversation going
                 last_wake_time = time.time()
 

@@ -36,6 +36,7 @@ services:
     container_name: ai_django
     volumes:
       - ./django_app:/app
+      - deepface_weights:/root/.deepface/weights
     env_file:
       - .env
     environment:
@@ -55,3 +56,4 @@ services:
 volumes:
   postgres_data:
   ollama_data:
+  deepface_weights:
