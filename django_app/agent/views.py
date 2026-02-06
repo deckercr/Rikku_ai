@@ -137,38 +137,39 @@ def chat(request):
                 logger.exception("Face recognition failed, continuing without identity")
 
         # --- Build system prompt ---
-        tool_descriptions = build_tool_descriptions()
-
         if image_data:
+            # Vision requests: only offer enroll_user tool, not capture/screenshot
+            # (the client already captured and sent the image)
             if identified_user:
-                # Known user with image
                 system_prompt = (
-                    "You are Rikku, a friendly AI assistant with vision capabilities. "
-                    f"You are currently talking to {identified_user}. "
-                    "An image has been shared with you. Respond helpfully.\n\n"
-                    f"{tool_descriptions}"
+                    "You are Rikku, a friendly AI waifu assistant. "
+                    f"You are currently talking to {identified_user} — you recognize them. "
+                    "A live webcam image is attached. Respond conversationally to what they said. "
+                    "Do NOT describe the image unless they ask you to. "
+                    "Do NOT use any tools unless explicitly asked."
                 )
             elif face_detected:
-                # Unknown face — ask who they are and offer to enroll
                 system_prompt = (
-                    "You are Rikku, a friendly AI assistant with vision capabilities. "
-                    "You can see a person in the image but you do NOT recognize them. "
-                    "They are not in your memory yet. "
-                    "Greet them warmly and ask them their name. "
-                    "Once they tell you their name, use the enroll_user tool to remember their face: "
-                    "[TOOL: enroll_user:TheirName]\n\n"
-                    f"{tool_descriptions}"
+                    "You are Rikku, a friendly AI waifu assistant. "
+                    "A live webcam image is attached. You can see a person but you do NOT recognize them. "
+                    "They are not in your memory yet.\n\n"
+                    "IMPORTANT: Look at what the person said. "
+                    "If they are telling you their name (e.g. 'I'm John', 'My name is Sarah', 'It's Mike', etc.), "
+                    "respond ONLY with: [TOOL: enroll_user:TheirName]\n"
+                    "Replace TheirName with the actual name they gave you.\n\n"
+                    "If they have NOT told you their name yet, greet them warmly and ask what their name is "
+                    "so you can remember them. Do NOT describe their appearance. Do NOT use any other tools."
                 )
             else:
-                # Image but no face (screenshot, object, etc.)
                 system_prompt = (
-                    "You are Rikku, a friendly AI assistant with vision capabilities. "
-                    "An image has been shared with you. Describe what you see and respond helpfully.\n\n"
-                    f"{tool_descriptions}"
+                    "You are Rikku, a friendly AI waifu assistant with vision capabilities. "
+                    "An image has been shared with you. Describe what you see and respond helpfully. "
+                    "Do NOT use any tools unless explicitly asked."
                 )
         else:
+            tool_descriptions = build_tool_descriptions()
             system_prompt = (
-                "You are Rikku, a friendly and helpful AI assistant. "
+                "You are Rikku, a friendly and helpful AI waifu assistant. "
                 "You run on a home server and can interact with the host system.\n\n"
                 f"{tool_descriptions}"
             )

@@ -2,8 +2,7 @@ import base64
 import logging
 import threading
 import numpy as np
-from io import BytesIO
-from PIL import Image
+import cv2
 
 from pgvector.django import CosineDistance
 
@@ -51,10 +50,11 @@ def _get_deepface():
 
 
 def _b64_to_numpy(image_b64):
-    """Decode a base64 JPEG/PNG string into a numpy array (RGB, HWC)."""
+    """Decode a base64 JPEG/PNG string into a BGR numpy array for OpenCV/DeepFace."""
     image_bytes = base64.b64decode(image_b64)
-    image = Image.open(BytesIO(image_bytes)).convert("RGB")
-    return np.array(image)
+    nparr = np.frombuffer(image_bytes, np.uint8)
+    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)  # Returns BGR — what DeepFace expects
+    return img
 
 
 def extract_embedding(image_b64):
