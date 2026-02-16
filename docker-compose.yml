@@ -88,7 +88,7 @@ services:
       - LLM_TEXT_URL=http://llm-text:8080
       - LLM_VISION_URL=http://llm-vision:8080
       - TTS_URL=http://tts:8880
-      - TTS_ENABLED=true
+      - TTS_ENABLED=false
     ports:
       - "8080:8080"
     command: python manage.py runserver 0.0.0.0:8080
