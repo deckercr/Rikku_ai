@@ -1,12 +1,55 @@
 services:
-  # --- THE LLM ENGINE (Ollama) ---
-  llm:
-    image: ollama/ollama:latest
-    container_name: ai_llm
+  # --- TEXT/REASONING MODEL (GPT-OSS-20B via llama.cpp) ---
+  llm-text:
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    container_name: ai_llm_text
     volumes:
-      - ollama_data:/root/.ollama
+      - ./models:/models:ro
     ports:
-      - "11434:11434"
+      - "8081:8080"
+    environment:
+      - LLAMA_ARG_MODEL=/models/gpt-oss-20b-Q4_K_M.gguf
+      - LLAMA_ARG_CTX_SIZE=8192
+      - LLAMA_ARG_N_GPU_LAYERS=99
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  # --- VISION MODEL (LLaVA-1.6 via llama.cpp) ---
+  llm-vision:
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    container_name: ai_llm_vision
+    volumes:
+      - ./models:/models:ro
+    ports:
+      - "8082:8080"
+    environment:
+      - LLAMA_ARG_MODEL=/models/llava-v1.6-mistral-7b-Q4_K_M.gguf
+      - LLAMA_ARG_MMPROJ=/models/llava-v1.6-mistral-7b-mmproj-f16.gguf
+      - LLAMA_ARG_CTX_SIZE=4096
+      - LLAMA_ARG_N_GPU_LAYERS=99
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  # --- TEXT-TO-SPEECH (Qwen3-TTS) ---
+  tts:
+    build:
+      context: ./qwen3-tts
+      dockerfile: Dockerfile
+    container_name: ai_tts
+    ports:
+      - "8083:8880"
     deploy:
       resources:
         reservations:
@@ -42,12 +85,17 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - DATABASE_HOST=db
-      - OLLAMA_URL=http://llm:11434
+      - LLM_TEXT_URL=http://llm-text:8080
+      - LLM_VISION_URL=http://llm-vision:8080
+      - TTS_URL=http://tts:8880
+      - TTS_ENABLED=true
     ports:
       - "8080:8080"
     command: python manage.py runserver 0.0.0.0:8080
     depends_on:
-      - llm
+      - llm-text
+      - llm-vision
+      - tts
       - db
     # Uncomment when webcam is available:
     # devices:
@@ -55,5 +103,4 @@ services:
 
 volumes:
   postgres_data:
-  ollama_data:
   deepface_weights:

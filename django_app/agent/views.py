@@ -1,7 +1,9 @@
+import base64
 import json
 import os
 import re
 import logging
+import requests
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
@@ -15,13 +17,20 @@ from .models import UserProfile
 
 logger = logging.getLogger(__name__)
 
-OLLAMA_HOST = os.environ.get("OLLAMA_URL", "http://localhost:11434")
-MODEL_NAME = os.environ.get("OLLAMA_MODEL", "llama3.2-vision")
+# Text model (GPT-OSS-20B via llama.cpp)
+TEXT_MODEL_URL = os.environ.get("LLM_TEXT_URL", "http://localhost:8081")
+TEXT_MODEL_NAME = os.environ.get("LLM_TEXT_MODEL", "gpt-oss-20b")
 
-client = OpenAI(
-    base_url=f"{OLLAMA_HOST}/v1",
-    api_key="ollama",
-)
+# Vision model (LLaVA-1.6 via llama.cpp)
+VISION_MODEL_URL = os.environ.get("LLM_VISION_URL", "http://localhost:8082")
+VISION_MODEL_NAME = os.environ.get("LLM_VISION_MODEL", "llava-v1.6-mistral-7b")
+
+# TTS config (Qwen3-TTS)
+TTS_URL = os.environ.get("TTS_URL", "http://localhost:8083")
+TTS_ENABLED = os.environ.get("TTS_ENABLED", "false").lower() == "true"
+
+text_client = OpenAI(base_url=f"{TEXT_MODEL_URL}/v1", api_key="none")
+vision_client = OpenAI(base_url=f"{VISION_MODEL_URL}/v1", api_key="none")
 
 
 def build_tool_descriptions():
@@ -77,6 +86,24 @@ def execute_tool(tool_name, args=None):
         return True, str(result)
     except Exception as e:
         return False, f"Error executing {tool_name}: {str(e)}"
+
+
+def generate_speech(text: str) -> bytes | None:
+    """Generate speech audio from text using Qwen3-TTS."""
+    if not TTS_ENABLED:
+        return None
+    try:
+        resp = requests.post(
+            f"{TTS_URL}/v1/audio/speech",
+            json={"input": text, "voice": "vivian"},
+            timeout=60
+        )
+        if resp.status_code == 200:
+            return resp.content  # WAV/MP3 bytes
+        logger.warning(f"TTS returned status {resp.status_code}: {resp.text[:200]}")
+    except Exception as e:
+        logger.warning(f"TTS failed: {e}")
+    return None
 
 
 def build_user_message(prompt, image_data=None):
@@ -181,15 +208,22 @@ def chat(request):
             build_user_message(prompt, image_data)
         ]
 
-        logger.info(f"Sending request to Ollama (image: {image_data is not None})")
-
-        response = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=messages,
-        )
+        # Route to appropriate model based on image presence
+        if image_data:
+            logger.info("Sending request to vision model (LLaVA)")
+            response = vision_client.chat.completions.create(
+                model=VISION_MODEL_NAME,
+                messages=messages,
+            )
+        else:
+            logger.info("Sending request to text model (GPT-OSS)")
+            response = text_client.chat.completions.create(
+                model=TEXT_MODEL_NAME,
+                messages=messages,
+            )
 
         assistant_response = response.choices[0].message.content
-        logger.info(f"Ollama response: {assistant_response[:100]}...")
+        logger.info(f"LLM response: {assistant_response[:100]}...")
 
         # Check for tool calls (always, even with images — needed for enroll_user)
         tool_name, tool_args = parse_tool_call(assistant_response)
@@ -204,15 +238,29 @@ def chat(request):
                 "content": f"[Tool Result: {tool_result}]\nNow respond naturally to the user using this information."
             })
 
-            final_response = client.chat.completions.create(
-                model=MODEL_NAME,
-                messages=messages,
-            )
+            # Use same model routing for follow-up
+            if image_data:
+                final_response = vision_client.chat.completions.create(
+                    model=VISION_MODEL_NAME,
+                    messages=messages,
+                )
+            else:
+                final_response = text_client.chat.completions.create(
+                    model=TEXT_MODEL_NAME,
+                    messages=messages,
+                )
             reply = final_response.choices[0].message.content
         else:
             reply = assistant_response
 
-        return JsonResponse({"response": reply})
+        # Generate TTS audio if enabled
+        audio_b64 = None
+        if TTS_ENABLED:
+            audio_bytes = generate_speech(reply)
+            if audio_bytes:
+                audio_b64 = base64.b64encode(audio_bytes).decode()
+
+        return JsonResponse({"response": reply, "audio": audio_b64})
 
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON in request body"}, status=400)

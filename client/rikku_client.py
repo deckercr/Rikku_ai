@@ -13,6 +13,14 @@ import os
 import re
 from dotenv import load_dotenv
 
+# Optional pydub for MP3 playback
+try:
+    from pydub import AudioSegment
+    from pydub.playback import play
+    PYDUB_AVAILABLE = True
+except ImportError:
+    PYDUB_AVAILABLE = False
+
 # Load .env from project root (one level up from client/)
 load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
 
@@ -152,8 +160,8 @@ def hyprshot_available():
 
 HYPRSHOT_AVAILABLE = hyprshot_available()
 
-# Your server's IP
-SERVER_BASE = "http://10.0.0.5:8080"
+# Server URL (configurable via RIKKU_SERVER env var)
+SERVER_BASE = os.environ.get("RIKKU_SERVER", "http://10.0.0.5:8080")
 CHAT_URL = f"{SERVER_BASE}/api/chat/"
 ENROLL_URL = f"{SERVER_BASE}/api/identity/enroll/"
 IDENTIFY_URL = f"{SERVER_BASE}/api/identity/identify/"
@@ -330,6 +338,23 @@ def is_active_listening(last_wake_time):
     return (time.time() - last_wake_time) < ACTIVE_LISTEN_DURATION
 
 
+def play_audio_response(audio_b64):
+    """Play base64-encoded audio response from TTS."""
+    if not audio_b64:
+        return
+
+    if not PYDUB_AVAILABLE:
+        print("(TTS audio received but pydub not installed - pip install pydub)")
+        return
+
+    try:
+        audio_bytes = base64.b64decode(audio_b64)
+        audio = AudioSegment.from_mp3(io.BytesIO(audio_bytes))
+        play(audio)
+    except Exception as e:
+        print(f"(Audio playback failed: {e})")
+
+
 def get_remaining_active_time(last_wake_time):
     """Get remaining seconds in active listening mode."""
     if last_wake_time is None:
@@ -421,10 +446,17 @@ def send_to_rikku(prompt, vision_type=None, auto_identify=False):
     }
 
     try:
-        response = requests.post(CHAT_URL, json=payload, timeout=60)
+        response = requests.post(CHAT_URL, json=payload, timeout=120)
         response.raise_for_status()
-        reply = response.json().get('response')
+        data = response.json()
+        reply = data.get('response')
+        audio_b64 = data.get('audio')
         print("Rikku:", reply)
+
+        # Play TTS audio if available
+        if audio_b64:
+            play_audio_response(audio_b64)
+
         return reply
     except requests.exceptions.RequestException as e:
         print(f"Error connecting to Rikku: {e}")
@@ -460,10 +492,12 @@ if __name__ == "__main__":
 
     # Normal voice client mode
     print("Rikku Voice Client Active.")
+    print(f"  Server: {SERVER_BASE}")
     print(f"  Webcam: {CV2_AVAILABLE}")
     print(f"  Screenshot: {HYPRSHOT_AVAILABLE}")
     print(f"  Groq STT: {'configured' if GROQ_API_KEY else 'no API key (set GROQ_API_KEY)'}")
     print(f"  Local Whisper fallback: {WHISPER_AVAILABLE}")
+    print(f"  TTS Audio Playback: {PYDUB_AVAILABLE}")
     print(f"  Auto-Identify: {'ON' if auto_identify else 'OFF'}")
     print(f"  Wake words: {', '.join(WAKE_WORDS[:5])}...")
 
