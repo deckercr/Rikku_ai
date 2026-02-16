@@ -412,13 +412,20 @@ def list_profiles():
         print(f"Error listing profiles: {e}")
 
 
-def send_to_rikku(prompt, vision_type=None, auto_identify=False):
-    """Send prompt to Rikku server with optional vision."""
-    if not prompt:
+def send_to_rikku(prompt=None, audio_data=None, vision_type=None, auto_identify=False):
+    """Send prompt or audio to Rikku server with optional vision.
+
+    Args:
+        prompt: Text prompt (optional if audio provided)
+        audio_data: Base64-encoded WAV audio (optional, will be transcribed server-side)
+        vision_type: "webcam" or "screenshot" (optional)
+        auto_identify: Whether to attach webcam frame for face ID
+    """
+    if not prompt and not audio_data:
         return None
 
-    # Auto-trigger vision based on keywords
-    if vision_type is None:
+    # Auto-trigger vision based on keywords (only if we have text)
+    if vision_type is None and prompt:
         lower_prompt = prompt.lower()
         if any(word in lower_prompt for word in ["look", "webcam", "see me", "camera"]):
             vision_type = "webcam"
@@ -442,6 +449,7 @@ def send_to_rikku(prompt, vision_type=None, auto_identify=False):
 
     payload = {
         "prompt": prompt,
+        "audio": audio_data,
         "image": image_data
     }
 
@@ -451,6 +459,12 @@ def send_to_rikku(prompt, vision_type=None, auto_identify=False):
         data = response.json()
         reply = data.get('response')
         audio_b64 = data.get('audio')
+        transcript = data.get('transcript')
+
+        # Show transcript if audio was sent
+        if transcript:
+            print(f"You: {transcript}")
+
         print("Rikku:", reply)
 
         # Play TTS audio if available
@@ -495,65 +509,36 @@ if __name__ == "__main__":
     print(f"  Server: {SERVER_BASE}")
     print(f"  Webcam: {CV2_AVAILABLE}")
     print(f"  Screenshot: {HYPRSHOT_AVAILABLE}")
-    print(f"  Groq STT: {'configured' if GROQ_API_KEY else 'no API key (set GROQ_API_KEY)'}")
-    print(f"  Local Whisper fallback: {WHISPER_AVAILABLE}")
+    print(f"  STT: Server-side (Groq)")
     print(f"  TTS Audio Playback: {PYDUB_AVAILABLE}")
     print(f"  Auto-Identify: {'ON' if auto_identify else 'OFF'}")
-    print(f"  Wake words: {', '.join(WAKE_WORDS[:5])}...")
 
     # Detect input device
     input_device, device_samplerate = get_input_device()
 
-    if not GROQ_API_KEY and WHISPER_AVAILABLE:
-        # Only pre-load local model if Groq isn't configured
-        load_whisper_model()
-
     # Calibrate silence threshold for this mic/environment
     calibrate_silence(device=input_device, samplerate=device_samplerate)
 
-    print("\nListening for wake word 'Rikku'... (Ctrl+C to quit)")
-
-    # Track when we last heard the wake word
-    last_wake_time = None
+    print("\nListening... (speak to Rikku, Ctrl+C to quit)")
 
     try:
         while True:
-            # Show status
-            if is_active_listening(last_wake_time):
-                remaining = get_remaining_active_time(last_wake_time)
-                print(f"\n[Active listening: {remaining}s remaining]")
-            else:
-                print("\n[Waiting for wake word...]")
+            print("\n[Listening...]")
 
-            # 1. Record audio
+            # 1. Record audio (with voice activity detection)
             audio_buffer, rec_rate = record_audio(device=input_device, samplerate=device_samplerate)
 
-            # 2. Transcribe
-            text_query = transcribe_audio(audio_buffer, samplerate=rec_rate)
-
-            if not text_query:
+            # Skip if no audio captured
+            if len(audio_buffer) == 0:
                 continue
 
-            # Check for wake word or active listening mode
-            has_wake_word, processed_text = contains_wake_word(text_query)
+            # 2. Convert audio to base64 WAV
+            wav_bytes = audio_to_wav_bytes(audio_buffer, rec_rate)
+            audio_b64 = base64.b64encode(wav_bytes).decode('utf-8')
 
-            if has_wake_word:
-                # Wake word detected - activate and process the full sentence
-                last_wake_time = time.time()
-                print(f"[Wake word detected!]")
-                print(f"You: {processed_text}")
-                send_to_rikku(processed_text, auto_identify=auto_identify)
-
-            elif is_active_listening(last_wake_time):
-                # In active listening mode - process without wake word
-                print(f"You: {text_query}")
-                send_to_rikku(text_query, auto_identify=auto_identify)
-                # Reset the timer on each interaction to keep conversation going
-                last_wake_time = time.time()
-
-            else:
-                # Not active and no wake word - ignore (but show for debugging)
-                print(f"(Ignored: {text_query})")
+            # 3. Send audio to Django for transcription + response
+            print("[Processing...]")
+            send_to_rikku(audio_data=audio_b64, auto_identify=auto_identify)
 
     except KeyboardInterrupt:
         print("\nClosing Rikku Client.")

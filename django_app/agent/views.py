@@ -29,8 +29,41 @@ VISION_MODEL_NAME = os.environ.get("LLM_VISION_MODEL", "llava-v1.6-mistral-7b")
 TTS_URL = os.environ.get("TTS_URL", "http://localhost:8083")
 TTS_ENABLED = os.environ.get("TTS_ENABLED", "false").lower() == "true"
 
+# STT config (Groq Whisper)
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+GROQ_STT_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
+GROQ_STT_MODEL = "whisper-large-v3-turbo"
+
 text_client = OpenAI(base_url=f"{TEXT_MODEL_URL}/v1", api_key="none")
 vision_client = OpenAI(base_url=f"{VISION_MODEL_URL}/v1", api_key="none")
+
+
+def transcribe_audio(audio_b64: str) -> str:
+    """Transcribe base64-encoded audio using Groq Whisper API."""
+    if not GROQ_API_KEY:
+        logger.warning("GROQ_API_KEY not set, cannot transcribe audio")
+        return ""
+
+    try:
+        audio_bytes = base64.b64decode(audio_b64)
+        response = requests.post(
+            GROQ_STT_URL,
+            headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+            files={"file": ("audio.wav", audio_bytes, "audio/wav")},
+            data={
+                "model": GROQ_STT_MODEL,
+                "language": "en",
+                "response_format": "json",
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+        text = response.json().get("text", "").strip()
+        logger.info(f"Transcribed audio: {text}")
+        return text
+    except Exception as e:
+        logger.error(f"Audio transcription failed: {e}")
+        return ""
 
 
 def build_tool_descriptions():
@@ -133,14 +166,27 @@ def build_user_message(prompt, image_data=None):
 @csrf_exempt
 @require_http_methods(["POST"])
 def chat(request):
-    """Handle chat requests with tool calling, vision, and face identification."""
+    """Handle chat requests with tool calling, vision, and face identification.
+
+    Accepts:
+        prompt: Text prompt (optional if audio provided)
+        audio: Base64-encoded WAV audio to transcribe (optional)
+        image: Base64-encoded image for vision (optional)
+    """
     try:
         data = json.loads(request.body)
         prompt = data.get("prompt", "")
+        audio_data = data.get("audio")
         image_data = data.get("image")
 
+        # Transcribe audio if provided (overrides text prompt)
+        if audio_data:
+            prompt = transcribe_audio(audio_data)
+            if not prompt:
+                return JsonResponse({"error": "Audio transcription failed"}, status=400)
+
         if not prompt:
-            return JsonResponse({"error": "No prompt provided"}, status=400)
+            return JsonResponse({"error": "No prompt or audio provided"}, status=400)
 
         # Store image in thread-local so tools (like enroll_user) can access it
         if image_data:
@@ -260,7 +306,11 @@ def chat(request):
             if audio_bytes:
                 audio_b64 = base64.b64encode(audio_bytes).decode()
 
-        return JsonResponse({"response": reply, "audio": audio_b64})
+        return JsonResponse({
+            "response": reply,
+            "audio": audio_b64,
+            "transcript": prompt if audio_data else None,
+        })
 
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON in request body"}, status=400)
